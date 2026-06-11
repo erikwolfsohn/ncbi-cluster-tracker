@@ -27,6 +27,7 @@ dependencies = [
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.49.0"]
 openai = ["openai>=1.0.0"]
+azure = ["azure-identity>=1.15.0", "azure-keyvault-secrets>=4.7.0"]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

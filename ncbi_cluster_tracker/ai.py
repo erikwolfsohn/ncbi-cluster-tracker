@@ -80,6 +80,31 @@ def _get_anthropic_client() -> object | None:
     return anthropic.Anthropic()
 
 
+def _get_openai_api_key() -> str | None:
+    vault_url = os.environ.get("AZURE_KEY_VAULT_URL")
+    if vault_url:
+        try:
+            from azure.identity import DefaultAzureCredential
+            from azure.keyvault.secrets import SecretClient
+        except ImportError:
+            logger.warning(
+                "AZURE_KEY_VAULT_URL is set but azure packages are not installed; "
+                "install them with: pip install 'ncbi-cluster-tracker[azure]'"
+            )
+            return None
+        secret_name = os.environ.get("AZURE_OPENAI_SECRET_NAME")
+        if not secret_name:
+            logger.warning("AZURE_KEY_VAULT_URL is set but AZURE_OPENAI_SECRET_NAME is not; skipping AI summary")
+            return None
+        try:
+            client = SecretClient(vault_url=vault_url, credential=DefaultAzureCredential())
+            return client.get_secret(secret_name).value
+        except Exception as exc:
+            logger.warning(f"Failed to retrieve OpenAI API key from Azure Key Vault: {exc}")
+            return None
+    return os.environ.get("OPENAI_API_KEY") or None
+
+
 def _get_openai_client() -> object | None:
     try:
         import openai
@@ -89,10 +114,11 @@ def _get_openai_client() -> object | None:
             "install it with: pip install 'ncbi-cluster-tracker[openai]'"
         )
         return None
-    if not os.environ.get("OPENAI_API_KEY"):
-        logger.warning("OPENAI_API_KEY not set; skipping AI summary")
+    api_key = _get_openai_api_key()
+    if not api_key:
+        logger.warning("No OpenAI API key found; skipping AI summary")
         return None
-    return openai.OpenAI()
+    return openai.OpenAI(api_key=api_key)
 
 
 def get_client(provider: str | None = None) -> tuple[object, str] | None:
