@@ -97,7 +97,8 @@ def _get_openai_api_key() -> str | None:
             logger.warning("AZURE_KEY_VAULT_URL is set but AZURE_OPENAI_SECRET_NAME is not; skipping AI summary")
             return None
         try:
-            client = SecretClient(vault_url=vault_url, credential=DefaultAzureCredential())
+            credential = DefaultAzureCredential(additionally_allowed_tenants=["*"])
+            client = SecretClient(vault_url=vault_url, credential=credential)
             return client.get_secret(secret_name).value
         except Exception as exc:
             logger.warning(f"Failed to retrieve OpenAI API key from Azure Key Vault: {exc}")
