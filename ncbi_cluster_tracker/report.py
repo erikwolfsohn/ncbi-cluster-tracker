@@ -696,6 +696,7 @@ def write_final_report(
     command: str,
     ai_summary: bool = False,
     ai_provider: str | None = None,
+    ai_use_cache: bool = True,
 ) -> None:
     """
     Output final, standalone HTML report with all tables and plots. This
@@ -716,6 +717,7 @@ def write_final_report(
                     cluster_rows.iloc[0],
                     cluster_meta,
                     provider=ai_provider,
+                    use_cache=ai_use_cache,
                 )
                 if summary:
                     cluster_summaries[c.name] = summary
@@ -748,7 +750,7 @@ def write_final_report(
     global_ai_summary: str | None = None
     if ai_summary:
         from ncbi_cluster_tracker import ai as ai_module
-        global_ai_summary = ai_module.summarize_global(clusters_df, provider=ai_provider)
+        global_ai_summary = ai_module.summarize_global(clusters_df, provider=ai_provider, use_cache=ai_use_cache)
 
     cluster_page_blocks = [ar.HTML(f'<h2>Cluster report {os.environ["NCT_NOW"]}</h2>')]
     command_header = ar.Text('Command: ')

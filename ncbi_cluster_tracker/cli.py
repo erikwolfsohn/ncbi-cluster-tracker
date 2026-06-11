@@ -60,6 +60,12 @@ def parse_args(command: Sequence[str]) -> argparse.Namespace:
         choices=['anthropic', 'openai'],
         default=None,
     )
+    parser.add_argument(
+        '--no-ai-cache',
+        help='Disable the AI summary cache and always call the LLM, even for unchanged clusters.',
+        action='store_true',
+        default=False,
+    )
     mutex_group_compare = parser.add_mutually_exclusive_group()
     mutex_group_compare.add_argument(
         '--compare-dir',

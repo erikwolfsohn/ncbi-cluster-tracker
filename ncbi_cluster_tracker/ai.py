@@ -1,9 +1,15 @@
+import hashlib
+import json
 import logging
 import os
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+_CONTEXT_LIMITS = {"anthropic": 200_000, "openai": 128_000}
+# Headroom reserved for system prompt, output tokens, and tokenizer drift
+_RESERVED_TOKENS = 5_000
 
 SYSTEM_PROMPT = (
     "You are an expert in infectious disease surveillance and public health microbiology. "
@@ -20,6 +26,43 @@ SYSTEM_PROMPT = (
     "Focus on cluster growth trends, new isolates, geographic spread, AMR concerns, and clusters "
     "that warrant attention. Avoid speculation; stick to what the data shows."
 )
+
+AI_CACHE_PATH = ".ncbi_cluster_tracker_ai_cache.json"
+
+_TIKTOKEN_FALLBACK_LOGGED = False
+
+
+def _cache_key(prompt: str) -> str:
+    return hashlib.sha256((SYSTEM_PROMPT + prompt).encode()).hexdigest()
+
+
+def _load_cache(cache_path: str) -> dict:
+    try:
+        with open(cache_path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_cache(cache: dict, cache_path: str) -> None:
+    with open(cache_path, "w") as f:
+        json.dump(cache, f, indent=2)
+
+
+def _n_tokens(text: str) -> int:
+    global _TIKTOKEN_FALLBACK_LOGGED
+    try:
+        import tiktoken
+        return len(tiktoken.encoding_for_model("gpt-4o").encode(text))
+    except Exception:
+        if not _TIKTOKEN_FALLBACK_LOGGED:
+            logger.debug("tiktoken not available; using character-based token estimate")
+            _TIKTOKEN_FALLBACK_LOGGED = True
+        return len(text) // 4
+
+
+def _prompt_budget(provider: str) -> int:
+    return _CONTEXT_LIMITS.get(provider, 128_000) - _RESERVED_TOKENS
 
 
 def _get_anthropic_client() -> object | None:
@@ -77,6 +120,10 @@ def _call_llm(client: object, provider: str, user_prompt: str, max_tokens: int =
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
+        logger.info(
+            f"Anthropic token usage — input: {response.usage.input_tokens}, "
+            f"output: {response.usage.output_tokens}"
+        )
         return response.content[0].text
     if provider == "openai":
         response = client.chat.completions.create(  # type: ignore[union-attr]
@@ -87,48 +134,94 @@ def _call_llm(client: object, provider: str, user_prompt: str, max_tokens: int =
                 {"role": "user", "content": user_prompt},
             ],
         )
+        logger.info(
+            f"OpenAI token usage — input: {response.usage.prompt_tokens}, "
+            f"output: {response.usage.completion_tokens}"
+        )
         return response.choices[0].message.content
     raise ValueError(f"Unknown provider: {provider}")
 
 
-def _build_global_prompt(clusters_df: pd.DataFrame) -> str:
-    cols_to_show = [c for c in [
-        "cluster", "taxgroup_name", "internal_count", "external_count",
-        "change", "latest_added", "earliest_year_collected", "latest_year_collected",
-    ] if c in clusters_df.columns]
-    table = clusters_df[cols_to_show].to_string(index=False, max_rows=50)
-    return (
+_GLOBAL_PRIORITY_COLS = [
+    "cluster", "taxgroup_name", "internal_count", "external_count", "change", "latest_added",
+]
+_GLOBAL_LOW_PRIORITY_COLS = ["earliest_year_collected", "latest_year_collected", "tree_url"]
+
+
+def _build_global_prompt(clusters_df: pd.DataFrame, token_budget: int) -> str | None:
+    header = (
         f"The following table summarizes {len(clusters_df)} SNP cluster(s) detected for a public health "
         f"laboratory. Write a concise surveillance summary (3-5 bullet points) suitable for a weekly "
         f"situation report. Highlight any clusters of concern, growth trends, new clusters, and "
-        f"epidemiological patterns.\n\nClusters table:\n{table}"
+        f"epidemiological patterns.\n\nClusters table:\n"
     )
+    table_budget = token_budget - _n_tokens(header)
+
+    priority_cols = [c for c in _GLOBAL_PRIORITY_COLS if c in clusters_df.columns]
+    all_cols = priority_cols + [c for c in _GLOBAL_LOW_PRIORITY_COLS if c in clusters_df.columns]
+    n = len(clusters_df)
+
+    for cols, n_rows in [
+        (all_cols, n),
+        (priority_cols, n),
+        (priority_cols, max(n // 2, 1)),
+        (priority_cols, 10),
+    ]:
+        table = clusters_df[cols].head(n_rows).to_csv(index=False)
+        if _n_tokens(table) <= table_budget:
+            if n_rows < n:
+                logger.info(f"Global prompt: truncated clusters table to {n_rows}/{n} rows to fit context window")
+            return header + table
+
+    logger.warning("Clusters table too large for context window even after truncation; skipping global AI summary")
+    return None
+
+
+_CLUSTER_LOW_PRIORITY_COLS = ["sra_id", "bioproject_acc", "target_acc"]
 
 
 def _build_cluster_prompt(
     cluster_name: str,
     cluster_row: pd.Series,
     isolates_df: pd.DataFrame,
+    token_budget: int,
 ) -> str:
-    cluster_info = cluster_row.to_string()
+    cluster_info = cluster_row.to_frame().T.to_csv(index=False)
     n_isolates = len(isolates_df)
     n_internal = int((isolates_df["source"] == "internal").sum()) if "source" in isolates_df.columns else "unknown"
     n_external = int((isolates_df["source"] == "external").sum()) if "source" in isolates_df.columns else "unknown"
     n_new = int((isolates_df["is_new"] == "yes").sum()) if "is_new" in isolates_df.columns else "unknown"
-    isolate_preview = isolates_df.head(20).to_string(index=False)
-    return (
+
+    header = (
         f"Write a 2-3 sentence summary of cluster '{cluster_name}' for a public health report. "
         f"Include: organism name, internal vs external isolate counts, new isolates if any, "
         f"geographic distribution if apparent, and whether this cluster warrants attention.\n\n"
         f"Cluster metadata:\n{cluster_info}\n\n"
         f"Isolates ({n_isolates} total; {n_internal} internal, {n_external} external; {n_new} new):\n"
-        f"{isolate_preview}"
     )
+    table_budget = token_budget - _n_tokens(header)
+
+    low_pri = [c for c in _CLUSTER_LOW_PRIORITY_COLS if c in isolates_df.columns]
+    df = isolates_df.drop(columns=low_pri)
+    n = len(df)
+
+    for n_rows in [n, max(n // 2, 1), 10, 0]:
+        if n_rows == 0:
+            logger.info(f"Cluster '{cluster_name}': omitting isolates table to fit context window")
+            return header + "(isolates table omitted: too large for context window)"
+        table = df.head(n_rows).to_csv(index=False)
+        if _n_tokens(table) <= table_budget:
+            if n_rows < n:
+                logger.info(f"Cluster '{cluster_name}': truncated isolates table to {n_rows}/{n} rows")
+            return header + table
+
+    return header + "(isolates table omitted: too large for context window)"
 
 
 def summarize_global(
     clusters_df: pd.DataFrame,
     provider: str | None = None,
+    use_cache: bool = True,
 ) -> str | None:
     """Generate a global AI summary of all clusters. Returns markdown text or None on failure."""
     result = get_client(provider)
@@ -136,8 +229,23 @@ def summarize_global(
         return None
     client, detected_provider = result
     try:
-        prompt = _build_global_prompt(clusters_df)
-        return _call_llm(client, detected_provider, prompt, max_tokens=512)
+        budget = _prompt_budget(detected_provider)
+        prompt = _build_global_prompt(clusters_df, budget)
+        if prompt is None:
+            return None
+        if use_cache:
+            cache = _load_cache(AI_CACHE_PATH)
+            key = _cache_key(prompt)
+            if key in cache:
+                logger.info("Global prompt: using cached AI summary")
+                return cache[key]
+        estimated = _n_tokens(prompt) + _n_tokens(SYSTEM_PROMPT)
+        logger.info(f"Global prompt: ~{estimated} estimated tokens (budget: {budget})")
+        result_text = _call_llm(client, detected_provider, prompt, max_tokens=512)
+        if use_cache:
+            cache[key] = result_text
+            _save_cache(cache, AI_CACHE_PATH)
+        return result_text
     except Exception as exc:
         logger.warning(f"AI global summary failed: {exc}")
         return None
@@ -148,6 +256,7 @@ def summarize_cluster(
     cluster_row: pd.Series,
     isolates_df: pd.DataFrame,
     provider: str | None = None,
+    use_cache: bool = True,
 ) -> str | None:
     """Generate an AI summary for a single cluster. Returns markdown text or None on failure."""
     result = get_client(provider)
@@ -155,8 +264,21 @@ def summarize_cluster(
         return None
     client, detected_provider = result
     try:
-        prompt = _build_cluster_prompt(cluster_name, cluster_row, isolates_df)
-        return _call_llm(client, detected_provider, prompt, max_tokens=256)
+        budget = _prompt_budget(detected_provider)
+        prompt = _build_cluster_prompt(cluster_name, cluster_row, isolates_df, budget)
+        if use_cache:
+            cache = _load_cache(AI_CACHE_PATH)
+            key = _cache_key(prompt)
+            if key in cache:
+                logger.info(f"Cluster '{cluster_name}': using cached AI summary")
+                return cache[key]
+        estimated = _n_tokens(prompt) + _n_tokens(SYSTEM_PROMPT)
+        logger.info(f"Cluster '{cluster_name}' prompt: ~{estimated} estimated tokens (budget: {budget})")
+        result_text = _call_llm(client, detected_provider, prompt, max_tokens=256)
+        if use_cache:
+            cache[key] = result_text
+            _save_cache(cache, AI_CACHE_PATH)
+        return result_text
     except Exception as exc:
         logger.warning(f"AI summary for cluster '{cluster_name}' failed: {exc}")
         return None

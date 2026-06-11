@@ -105,6 +105,7 @@ def main() -> None:
         command,
         ai_summary=args.ai_summary,
         ai_provider=args.ai_provider,
+        ai_use_cache=not args.no_ai_cache,
     )
 
 
