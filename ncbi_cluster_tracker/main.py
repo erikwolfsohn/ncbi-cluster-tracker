@@ -103,6 +103,8 @@ def main() -> None:
         amr_df,
         args.compare_dir,
         command,
+        ai_summary=args.ai_summary,
+        ai_provider=args.ai_provider,
     )
 
 

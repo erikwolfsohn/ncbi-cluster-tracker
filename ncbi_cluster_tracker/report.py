@@ -24,17 +24,19 @@ class ClusterReport:
     ]
 
     def __init__(
-        self, 
+        self,
         cluster: cluster.Cluster,
         metadata: pd.DataFrame,
         clusters_df: pd.DataFrame,
-        sample_sheet_metadata_cols: list[str] = []
+        sample_sheet_metadata_cols: list[str] = [],
+        ai_summary: str | None = None,
     ):
 
         self.cluster = cluster
         self.clusters_df = clusters_df
         self.metadata = metadata
         self.sample_sheet_metadata_cols = sample_sheet_metadata_cols
+        self.ai_summary = ai_summary
         self.metadata_truncated = self._truncate_metadata(metadata.copy()).fillna('')
         self.snp_matrix = self._create_snp_matrix()
         self.custom_labels = self._create_custom_labels()
@@ -416,8 +418,10 @@ class ClusterReport:
             new = '🆕'
         else:
             new = ''
+        ai_block = [ar.Text(self.ai_summary)] if self.ai_summary is not None else []
         blocks = [
                 title,
+                *ai_block,
                 count_blocks,
                 tree_header,
                 tree_links_block,
@@ -528,17 +532,20 @@ def create_cluster_reports(
     clusters_df: pd.DataFrame,
     metadata: pd.DataFrame,
     sample_sheet_metadata_cols: list[str],
+    cluster_summaries: dict[str, str] | None = None,
 ) -> list[ClusterReport]:
     """
     Create a ClusterReport for all clusters.
     """
     cluster_reports: list[ClusterReport] = []
     for cluster in clusters:
+        ai_summary_text = (cluster_summaries or {}).get(cluster.name)
         cluster_report = ClusterReport(
             cluster,
             metadata[metadata['cluster'] == cluster.name],
             clusters_df[clusters_df['cluster'] == cluster.name],
             sample_sheet_metadata_cols=sample_sheet_metadata_cols,
+            ai_summary=ai_summary_text,
         )
         cluster_reports.append(cluster_report)
     return cluster_reports
@@ -681,12 +688,14 @@ def create_clusters_timeline_plot(
 def write_final_report(
     clusters_df: pd.DataFrame,
     old_clusters_df: pd.DataFrame | None,
-    clusters: list[cluster.Cluster], 
+    clusters: list[cluster.Cluster],
     metadata: pd.DataFrame,
     sample_sheet_metadata_cols: list[str],
     amr_df: pd.DataFrame | None,
     compare_dir: str | None,
-    command: str
+    command: str,
+    ai_summary: bool = False,
+    ai_provider: str | None = None,
 ) -> None:
     """
     Output final, standalone HTML report with all tables and plots. This
@@ -695,11 +704,27 @@ def write_final_report(
     logger.info('Generating HTML report...')
     clusters_df = add_counts(clusters_df, metadata)
     clusters_df = compare_counts(clusters_df, old_clusters_df)
+    cluster_summaries: dict[str, str] = {}
+    if ai_summary:
+        from ncbi_cluster_tracker import ai as ai_module
+        for c in clusters:
+            cluster_meta = metadata[metadata['cluster'] == c.name]
+            cluster_rows = clusters_df[clusters_df['cluster'] == c.name]
+            if not cluster_rows.empty:
+                summary = ai_module.summarize_cluster(
+                    c.name,
+                    cluster_rows.iloc[0],
+                    cluster_meta,
+                    provider=ai_provider,
+                )
+                if summary:
+                    cluster_summaries[c.name] = summary
     cluster_reports = create_cluster_reports(
         clusters,
         clusters_df,
         metadata,
         sample_sheet_metadata_cols,
+        cluster_summaries=cluster_summaries,
     )
     keep_cols = [
         'cluster',
@@ -720,6 +745,11 @@ def write_final_report(
     )
     clusters_df.to_csv(clusters_csv, index=False)
 
+    global_ai_summary: str | None = None
+    if ai_summary:
+        from ncbi_cluster_tracker import ai as ai_module
+        global_ai_summary = ai_module.summarize_global(clusters_df, provider=ai_provider)
+
     cluster_page_blocks = [ar.HTML(f'<h2>Cluster report {os.environ["NCT_NOW"]}</h2>')]
     command_header = ar.Text('Command: ')
     command_block = ar.Code(code=command, language='javascript')
@@ -729,6 +759,11 @@ def write_final_report(
         header_2 = ar.Text(f'↔️ Comparing to {compare_dir}')
         cluster_page_blocks.append(header_2)
         isolate_page_blocks.append(header_2)
+    if global_ai_summary is not None:
+        cluster_page_blocks.extend([
+            ar.HTML('<h3>AI Summary</h3>'),
+            ar.Text(global_ai_summary),
+        ])
 
     if clusters_df.empty:
         clusters_table = ar.Text('No cluster data available.')

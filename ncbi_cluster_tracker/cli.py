@@ -48,6 +48,18 @@ def parse_args(command: Sequence[str]) -> argparse.Namespace:
         action='version',
         version=version('ncbi-cluster-tracker'),
     )
+    parser.add_argument(
+        '--ai-summary',
+        help='Generate AI summaries for clusters using an LLM. Requires ANTHROPIC_API_KEY or OPENAI_API_KEY.',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument(
+        '--ai-provider',
+        help='LLM provider to use for AI summaries. Auto-detected from environment variables if not specified.',
+        choices=['anthropic', 'openai'],
+        default=None,
+    )
     mutex_group_compare = parser.add_mutually_exclusive_group()
     mutex_group_compare.add_argument(
         '--compare-dir',
