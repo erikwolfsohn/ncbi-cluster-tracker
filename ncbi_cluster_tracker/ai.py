@@ -119,6 +119,14 @@ def _get_openai_client() -> object | None:
     if not api_key:
         logger.warning("No OpenAI API key found; skipping AI summary")
         return None
+    azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")
+    if azure_endpoint:
+        api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-01")
+        return openai.AzureOpenAI(
+            azure_endpoint=azure_endpoint,
+            api_key=api_key,
+            api_version=api_version,
+        )
     return openai.OpenAI(api_key=api_key)
 
 
@@ -154,7 +162,7 @@ def _call_llm(client: object, provider: str, user_prompt: str, max_tokens: int =
         return response.content[0].text
     if provider == "openai":
         response = client.chat.completions.create(  # type: ignore[union-attr]
-            model="gpt-4o",
+            model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
             max_tokens=max_tokens,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},

@@ -21,6 +21,13 @@ from ncbi_cluster_tracker import report
 
 from ncbi_cluster_tracker.logger import logger
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+
 def main() -> None:
     command = f'{os.path.basename(sys.argv[0])} {" ".join(sys.argv[1:])}'
     args = cli.parse_args(sys.argv[1:])
