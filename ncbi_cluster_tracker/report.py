@@ -748,9 +748,17 @@ def write_final_report(
     clusters_df.to_csv(clusters_csv, index=False)
 
     global_ai_summary: str | None = None
+    amr_ai_summary: str | None = None
     if ai_summary:
         from ncbi_cluster_tracker import ai as ai_module
         global_ai_summary = ai_module.summarize_global(clusters_df, provider=ai_provider, use_cache=ai_use_cache)
+        if amr_df is not None:
+            amr_df_with_source = amr_df.merge(
+                metadata[["biosample", "source"]].drop_duplicates(),
+                on="biosample",
+                how="left",
+            )
+            amr_ai_summary = ai_module.summarize_amr(amr_df_with_source, provider=ai_provider, use_cache=ai_use_cache)
 
     cluster_page_blocks = [ar.HTML(f'<h2>Cluster report {os.environ["NCT_NOW"]}</h2>')]
     command_header = ar.Text('Command: ')
@@ -840,6 +848,11 @@ def write_final_report(
 
     if amr_df is not None:
         amr_blocks = []
+        if amr_ai_summary is not None:
+            amr_blocks.extend([
+                ar.HTML('<h3>AI Summary</h3>'),
+                ar.Text(amr_ai_summary),
+            ])
         if 'filtered_amr' in metadata:
             args = command.split(' ')  
             for i in range(len(args)):

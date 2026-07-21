@@ -24,7 +24,11 @@ SYSTEM_PROMPT = (
     "- AMR: antimicrobial resistance genes detected by AMRFinderPlus\n\n"
     "Your summaries should be concise, factual, and highlight epidemiological significance. "
     "Focus on cluster growth trends, new isolates, geographic spread, AMR concerns, and clusters "
-    "that warrant attention. Avoid speculation; stick to what the data shows."
+    "that warrant attention. Avoid speculation; stick to what the data shows.\n\n"
+    "Note on the 'change' field: a value of 'new cluster' means no previous report was available "
+    "for comparison — it does NOT mean the cluster is newly emerged in the Pathogen Detection "
+    "system. Only interpret 'change' as indicating growth or decline when it contains a numeric "
+    "value (e.g. '+2 / +5')."
 )
 
 AI_CACHE_PATH = ".ncbi_cluster_tracker_ai_cache.json"
@@ -163,7 +167,7 @@ def _call_llm(client: object, provider: str, user_prompt: str, max_tokens: int =
     if provider == "openai":
         response = client.chat.completions.create(  # type: ignore[union-attr]
             model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
-            max_tokens=max_tokens,
+            max_completion_tokens=max_tokens,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
@@ -316,4 +320,92 @@ def summarize_cluster(
         return result_text
     except Exception as exc:
         logger.warning(f"AI summary for cluster '{cluster_name}' failed: {exc}")
+        return None
+
+
+def _amr_grouped_summary(amr_df: pd.DataFrame) -> pd.DataFrame:
+    return (
+        amr_df.groupby(["class", "subclass", "element", "product_name"], dropna=False)["biosample"]
+        .nunique()
+        .reset_index()
+        .rename(columns={"biosample": "isolate_count"})
+        .sort_values(["class", "subclass", "isolate_count"], ascending=[True, True, False])
+    )
+
+
+def _build_amr_prompt(amr_df: pd.DataFrame, token_budget: int) -> str | None:
+    has_source = "source" in amr_df.columns
+    if not has_source:
+        logger.warning("AMR prompt: 'source' column not found; internal isolate section will be omitted")
+    internal_df = amr_df[amr_df["source"] == "internal"] if has_source else pd.DataFrame()
+    if has_source and internal_df.empty:
+        logger.warning("AMR prompt: no internal isolates found in AMR data; internal isolate section will be omitted")
+
+    overall_summary = _amr_grouped_summary(amr_df)
+    n_isolates = amr_df["biosample"].nunique()
+    n_elements = amr_df["element"].nunique()
+
+    header = (
+        f"The following antimicrobial resistance (AMR) data was detected across {n_isolates} isolates "
+        f"({n_elements} unique resistance elements) in these SNP clusters. "
+        f"Write a summary with the following sections:\n"
+        f"1. Overall resistance landscape (2-3 bullets): which drug classes are affected and clinical significance\n"
+        f"2. Internal isolates (1-2 bullets, REQUIRED): specifically describe which resistance genes were found "
+        f"in the laboratory's own isolates and whether they differ from the broader cluster. "
+        f"If internal isolates only carry intrinsic/species-typical genes, state that explicitly.\n\n"
+        f"Overall AMR findings (all isolates):\n"
+    )
+
+    if not internal_df.empty:
+        internal_summary = _amr_grouped_summary(internal_df)
+        n_internal = internal_df["biosample"].nunique()
+        internal_section = (
+            f"\nAMR findings in internal isolates only ({n_internal} isolates):\n"
+            + internal_summary.to_csv(index=False)
+        )
+    else:
+        internal_section = ""
+
+    table_budget = token_budget - _n_tokens(header) - _n_tokens(internal_section)
+    n = len(overall_summary)
+    for n_rows in [n, max(n // 2, 1), 10]:
+        table = overall_summary.head(n_rows).to_csv(index=False)
+        if _n_tokens(table) <= table_budget:
+            if n_rows < n:
+                logger.info(f"AMR prompt: truncated overall table to {n_rows}/{n} rows to fit context window")
+            return header + table + internal_section
+    logger.warning("AMR table too large for context window even after truncation; skipping AMR AI summary")
+    return None
+
+
+def summarize_amr(
+    amr_df: pd.DataFrame,
+    provider: str | None = None,
+    use_cache: bool = True,
+) -> str | None:
+    """Generate an AI summary of AMR findings. Returns markdown text or None on failure."""
+    result = get_client(provider)
+    if result is None:
+        return None
+    client, detected_provider = result
+    try:
+        budget = _prompt_budget(detected_provider)
+        prompt = _build_amr_prompt(amr_df, budget)
+        if prompt is None:
+            return None
+        if use_cache:
+            cache = _load_cache(AI_CACHE_PATH)
+            key = _cache_key(prompt)
+            if key in cache:
+                logger.info("AMR prompt: using cached AI summary")
+                return cache[key]
+        estimated = _n_tokens(prompt) + _n_tokens(SYSTEM_PROMPT)
+        logger.info(f"AMR prompt: ~{estimated} estimated tokens (budget: {budget})")
+        result_text = _call_llm(client, detected_provider, prompt, max_tokens=1024)
+        if use_cache:
+            cache[key] = result_text
+            _save_cache(cache, AI_CACHE_PATH)
+        return result_text
+    except Exception as exc:
+        logger.warning(f"AI AMR summary failed: {exc}")
         return None
