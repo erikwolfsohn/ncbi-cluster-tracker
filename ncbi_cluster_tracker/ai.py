@@ -182,7 +182,7 @@ def _call_llm(client: object, provider: str, user_prompt: str, max_tokens: int =
 
 
 _GLOBAL_PRIORITY_COLS = [
-    "cluster", "taxgroup_name", "internal_count", "external_count", "change", "latest_added",
+    "cluster", "taxgroup_name", "internal_count", "external_count", "change", "latest_added", "amr_genes",
 ]
 _GLOBAL_LOW_PRIORITY_COLS = ["earliest_year_collected", "latest_year_collected", "tree_url"]
 
@@ -324,8 +324,12 @@ def summarize_cluster(
 
 
 def _amr_grouped_summary(amr_df: pd.DataFrame) -> pd.DataFrame:
+    group_cols = ["class", "subclass", "element", "product_name"]
+    for col in ["resistance_mechanism", "gene_family"]:
+        if col in amr_df.columns:
+            group_cols.append(col)
     return (
-        amr_df.groupby(["class", "subclass", "element", "product_name"], dropna=False)["biosample"]
+        amr_df.groupby(group_cols, dropna=False)["biosample"]
         .nunique()
         .reset_index()
         .rename(columns={"biosample": "isolate_count"})

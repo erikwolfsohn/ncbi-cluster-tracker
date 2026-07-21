@@ -747,11 +747,33 @@ def write_final_report(
     )
     clusters_df.to_csv(clusters_csv, index=False)
 
+    if amr_df is not None:
+        amr_csv = os.path.join(
+            os.environ['NCT_OUT_SUBDIR'],
+            f'amr_{os.environ["NCT_NOW"]}.csv'
+        )
+        amr_df.to_csv(amr_csv, index=False)
+
     global_ai_summary: str | None = None
     amr_ai_summary: str | None = None
     if ai_summary:
         from ncbi_cluster_tracker import ai as ai_module
-        global_ai_summary = ai_module.summarize_global(clusters_df, provider=ai_provider, use_cache=ai_use_cache)
+        clusters_df_for_ai = clusters_df.copy()
+        if amr_df is not None:
+            cluster_amr = amr_df.merge(
+                metadata[['biosample', 'cluster']].drop_duplicates(),
+                on='biosample',
+                how='left',
+            ).dropna(subset=['cluster'])
+            cluster_amr_agg = (
+                cluster_amr.groupby('cluster')['element']
+                .apply(lambda x: '; '.join(sorted(x.unique())))
+                .reset_index()
+                .rename(columns={'element': 'amr_genes'})
+            )
+            clusters_df_for_ai = clusters_df_for_ai.merge(cluster_amr_agg, on='cluster', how='left')
+            clusters_df_for_ai['amr_genes'] = clusters_df_for_ai['amr_genes'].fillna('none detected')
+        global_ai_summary = ai_module.summarize_global(clusters_df_for_ai, provider=ai_provider, use_cache=ai_use_cache)
         if amr_df is not None:
             amr_df_with_source = amr_df.merge(
                 metadata[["biosample", "source"]].drop_duplicates(),

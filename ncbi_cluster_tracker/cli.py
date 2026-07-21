@@ -66,6 +66,12 @@ def parse_args(command: Sequence[str]) -> argparse.Namespace:
         action='store_true',
         default=False,
     )
+    parser.add_argument(
+        '--no-card',
+        help='Skip downloading the CARD reference index when generating AMR AI summaries.',
+        action='store_true',
+        default=False,
+    )
     mutex_group_compare = parser.add_mutually_exclusive_group()
     mutex_group_compare.add_argument(
         '--compare-dir',

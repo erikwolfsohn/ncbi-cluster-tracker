@@ -120,3 +120,22 @@ def download_amr_reference_file() -> pd.DataFrame:
     df = df[['element', 'product_name', 'class', 'subclass', 'hierarchy_node']]
     df = df.drop_duplicates()
     return df
+
+
+def download_card_index() -> pd.DataFrame:
+    import tarfile
+    url = 'https://card.mcmaster.ca/latest/data'
+    logger.info('Downloading CARD reference index (this may take a moment)...')
+    response = requests.get(url)
+    response.raise_for_status()
+    with tarfile.open(fileobj=io.BytesIO(response.content), mode='r:bz2') as tar:
+        for member in tar.getmembers():
+            if member.name.endswith('aro_index.tsv'):
+                f = tar.extractfile(member)
+                if f is not None:
+                    df = pd.read_csv(f, sep='\t')
+                    df.columns = df.columns.str.strip()
+                    df = df[['ARO Name', 'Resistance Mechanism', 'AMR Gene Family', 'CARD Short Name']].drop_duplicates(subset=['ARO Name'])
+                    df['element_lower'] = df['ARO Name'].str.lower()
+                    return df
+    raise FileNotFoundError('aro_index.tsv not found in CARD data tarball')

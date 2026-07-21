@@ -87,10 +87,21 @@ def main() -> None:
             return
     
     if args.amr:
-        amr_ref_df = download.download_amr_reference_file()  
+        amr_ref_df = download.download_amr_reference_file()
         amr_df = query.create_amr_df(isolates_df, amr_ref_df)
         if args.filter_amr:
             amr_df = query.filter_amr_df(amr_df, args.filter_amr)
+        if args.ai_summary and not args.no_card:
+            card_df = download.download_card_index()
+            amr_df['element_lower'] = amr_df['element'].str.lower()
+            amr_df = amr_df.merge(
+                card_df[['element_lower', 'Resistance Mechanism', 'AMR Gene Family']].rename(columns={
+                    'Resistance Mechanism': 'resistance_mechanism',
+                    'AMR Gene Family': 'gene_family',
+                }),
+                on='element_lower',
+                how='left',
+            ).drop(columns='element_lower')
     else:
         amr_df = None
 
