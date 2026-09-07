@@ -31,6 +31,7 @@ except ImportError:
 def main() -> None:
     command = f'{os.path.basename(sys.argv[0])} {" ".join(sys.argv[1:])}'
     args = cli.parse_args(sys.argv[1:])
+    max_cluster_size = None if args.max_cluster_size == 0 else args.max_cluster_size
     sample_sheet_df = (pd
         .read_csv(args.sample_sheet, dtype={'id': 'string'})
         .set_index('biosample', verify_integrity=True)
@@ -74,7 +75,13 @@ def main() -> None:
         if clusters_df.empty:
             logger.info(no_clusters_message)
             return
-        download.download_cluster_files(clusters_df, args.keep_snp_files)
+        download.download_cluster_files(
+            clusters_df,
+            args.keep_snp_files,
+            max_cluster_size=max_cluster_size,
+            timeout=args.download_timeout,
+            chunk_size=args.download_chunk_size,
+        )
     else:
         if not os.path.isdir(out_dir):
             raise FileNotFoundError(f'Could not find existing output directory {out_dir} for --retry')
@@ -106,7 +113,9 @@ def main() -> None:
         amr_df = None
 
     clusters_df['tree_url'] = clusters_df.apply(download.build_tree_viewer_url, axis=1)
-    clusters = cluster.create_clusters(sample_sheet_df, isolates_df, clusters_df)
+    clusters = cluster.create_clusters(
+        sample_sheet_df, isolates_df, clusters_df, max_cluster_size=max_cluster_size
+    )
     if not args.keep_snp_files:
         shutil.rmtree(os.path.join(os.environ['NCT_OUT_SUBDIR'], 'snps'))
     isolates_df = report.mark_new_isolates(isolates_df, old_isolates_df)

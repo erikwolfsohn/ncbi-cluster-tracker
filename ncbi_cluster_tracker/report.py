@@ -233,19 +233,22 @@ class ClusterReport:
         # Isolate counts may differ between FTP and BigQuery datasets
         # if the FTP site updated before BigQuery or the FTP downloaded data is
         # outdated (second case less likely). In either case the user should be
-        # warned of the mismatch.
+        # warned of the mismatch. Skip this check entirely if the SNP tree was
+        # never downloaded (e.g. cluster exceeded --max-cluster-size), since
+        # there's no FTP-derived count to compare against in that case.
         warning_message = []
-        if self.cluster.external_isolates is not None:
-            external_count_ftp = len(self.cluster.external_isolates)
-        else:
-            external_count_ftp = 0
+        if not self.cluster.snp_tree_skipped:
+            if self.cluster.external_isolates is not None:
+                external_count_ftp = len(self.cluster.external_isolates)
+            else:
+                external_count_ftp = 0
 
-        if external_count != external_count_ftp:
-            warning_message = [ar.Text(
-                '⚠️ WARNING: A more up-to-date version of this cluster may be ' \
-                'available on the Pathogen Detection site with more ' \
-                'internal and/or external isolates (visit the backup link).' \
-            )]
+            if external_count != external_count_ftp:
+                warning_message = [ar.Text(
+                    '⚠️ WARNING: A more up-to-date version of this cluster may be ' \
+                    'available on the Pathogen Detection site with more ' \
+                    'internal and/or external isolates (visit the backup link).' \
+                )]
 
         # List specific new isolates
         MAX_DISPLAY = 5

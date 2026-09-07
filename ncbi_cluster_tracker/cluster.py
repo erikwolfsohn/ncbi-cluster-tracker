@@ -16,19 +16,40 @@ class Cluster:
     MAX_MATRIX_SIZE = 20
     MAX_TREE_SIZE = 500
 
-    def __init__(self, name: str, internal_isolates: list[str]):
+    def __init__(
+            self,
+            name: str,
+            internal_isolates: list[str],
+            total_count: int | None = None,
+            max_cluster_size: int | None = None,
+    ):
         self.name = name
         self.cluster_id = name.split('.')[0]
         self.internal_isolates = set(internal_isolates)
         self.external_isolates: set[str] | None = None
+        self.total_count = total_count
+        self.max_cluster_size = max_cluster_size
+        self.snp_tree_skipped = (
+            max_cluster_size is not None
+            and total_count is not None
+            and total_count > max_cluster_size
+        )
         self.filtered_matrix_message: str | None = None
         self.filtered_matrix: pd.DataFrame | None = self._create_filtered_matrix()
-    
+
     def _create_filtered_matrix(self) -> pd.DataFrame | None:
         """
         Generate distance matrix from downloaded Pathogen Detection tree,
         with number of isolates filtered down to a reasonably viewable number.
         """
+        if self.snp_tree_skipped:
+            self.filtered_matrix_message = (
+                f'SNP distance matrix not displayed and SNP tree not downloaded '
+                f'since cluster has {self.total_count} isolates, exceeding '
+                f'--max-cluster-size of {self.max_cluster_size}.'
+            )
+            return None
+
         tree_file_glob = f'{self.cluster_id}*.newick_tree.newick'
         tree_path = glob.glob(
             os.path.join(os.environ['NCT_OUT_SUBDIR'], 'snps', tree_file_glob
@@ -127,16 +148,37 @@ def create_clusters(
         sample_sheet_df: pd.DataFrame,
         isolates_df: pd.DataFrame,
         clusters_df: pd.DataFrame,
+        max_cluster_size: int | None = None,
     ) -> list[cluster.Cluster]:
     """
     Create list of all of the Clusters and their associated isolates.
     """
     clusters: list[cluster.Cluster] = []
     logger.info('Creating clusters...')
+    indexed_clusters_df = clusters_df.set_index('cluster')
+    if 'total_count' in indexed_clusters_df.columns:
+        total_counts = indexed_clusters_df['total_count']
+    elif {'internal_count', 'external_count'}.issubset(indexed_clusters_df.columns):
+        # total_count isn't persisted to the clusters CSV used by --retry, so
+        # fall back to the counts from the previous run.
+        total_counts = (
+            indexed_clusters_df['internal_count']
+            + indexed_clusters_df['external_count']
+        )
+    else:
+        total_counts = None
     for cluster_name in tqdm.tqdm(clusters_df['cluster'].tolist()):
         internal_isolates = isolates_df[
             (isolates_df['cluster'] == cluster_name)
             & (isolates_df['biosample'].isin(sample_sheet_df.index))
         ]['target_acc'].tolist()
-        clusters.append(cluster.Cluster(cluster_name, internal_isolates))
+        total_count = (
+            int(total_counts[cluster_name]) if total_counts is not None else None
+        )
+        clusters.append(cluster.Cluster(
+            cluster_name,
+            internal_isolates,
+            total_count=total_count,
+            max_cluster_size=max_cluster_size,
+        ))
     return clusters

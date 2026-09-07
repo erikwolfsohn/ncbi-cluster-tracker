@@ -10,6 +10,9 @@ import tqdm
 
 from ncbi_cluster_tracker.logger import logger
 
+DEFAULT_DOWNLOAD_TIMEOUT = 60.0
+DEFAULT_DOWNLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MiB
+
 # Can't auto-translate these to folders on NCBI FTP
 TAXGROUP_TO_ORGANISM = {
     'Acinetobacter baumannii': 'Acinetobacter',
@@ -26,10 +29,29 @@ TAXGROUP_TO_ORGANISM = {
 }
 
 
-def download_cluster_files(clusters_df: pd.DataFrame, keep_files: bool) -> None:
+def download_cluster_files(
+        clusters_df: pd.DataFrame,
+        keep_files: bool,
+        max_cluster_size: int | None = None,
+        timeout: float = DEFAULT_DOWNLOAD_TIMEOUT,
+        chunk_size: int = DEFAULT_DOWNLOAD_CHUNK_SIZE,
+) -> None:
     clusters_df['snp_url'] = clusters_df.apply(build_snp_url, axis=1)
-    urls = clusters_df['snp_url'].to_list()
-    download_snps(urls, keep_files)
+
+    if max_cluster_size is not None:
+        oversized_df = clusters_df[clusters_df['total_count'] > max_cluster_size]
+        for _, row in oversized_df.iterrows():
+            logger.warning(
+                f'Skipping SNP tree download for cluster {row["cluster"]}: '
+                f'{row["total_count"]} isolates exceeds --max-cluster-size '
+                f'of {max_cluster_size}.'
+            )
+        clusters_to_download_df = clusters_df[clusters_df['total_count'] <= max_cluster_size]
+    else:
+        clusters_to_download_df = clusters_df
+
+    urls = clusters_to_download_df['snp_url'].to_list()
+    download_snps(urls, keep_files, timeout=timeout, chunk_size=chunk_size)
 
 
 def build_ftp_base_url(taxgroup_name: str) -> str:
@@ -86,25 +108,49 @@ def build_tree_viewer_url(
     return url
 
 
-def download_snps(urls: list[str], keep_files: bool) -> None:
+def download_snps(
+        urls: list[str],
+        keep_files: bool,
+        timeout: float = DEFAULT_DOWNLOAD_TIMEOUT,
+        chunk_size: int = DEFAULT_DOWNLOAD_CHUNK_SIZE,
+) -> None:
     out_subdir = os.path.join(os.environ['NCT_OUT_SUBDIR'], 'snps')
     logger.info(f'Downloading SNP cluster data to {out_subdir}...')
     os.makedirs(out_subdir, exist_ok=True)
     for url in tqdm.tqdm(urls):
         with requests.Session() as session:
-            for _ in range(3):
-                response = session.get(url)
-                if response.ok:
+            destination = os.path.join(out_subdir, os.path.basename(url))
+            for attempt in range(3):
+                try:
+                    response = session.get(url, timeout=timeout, stream=True)
+                except requests.exceptions.RequestException as e:
+                    logger.warning(
+                        f'Download attempt {attempt + 1}/3 failed for {url}: {e}'
+                    )
+                    continue
+
+                if not response.ok:
+                    # try incrementing cluster version
+                    regex = r'(?<=\.)(\d+)(?=\.tar\.gz)'
+                    url = re.sub(regex, lambda x: str(int(x.group())+1), url)
+                    destination = os.path.join(out_subdir, os.path.basename(url))
+                    continue
+
+                try:
+                    with open(destination, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=chunk_size):
+                            if chunk:
+                                f.write(chunk)
                     break
-                # try incrementing cluster version
-                regex = r'(?<=\.)(\d+)(?=\.tar\.gz)'
-                url = re.sub(regex, lambda x: str(int(x.group())+1), url)
+                except requests.exceptions.RequestException as e:
+                    if os.path.exists(destination):
+                        os.remove(destination)
+                    logger.warning(
+                        f'Download attempt {attempt + 1}/3 failed for {url}: {e}'
+                    )
             else:
                 raise Exception(f'Could not find cluster: {url}')
 
-            destination = os.path.join(out_subdir, os.path.basename(url))
-            with open(destination, 'wb') as f:
-                f.write(response.content)
             shutil.unpack_archive(destination, out_subdir)
             out_files = os.listdir(out_subdir)
             for out_file in out_files:

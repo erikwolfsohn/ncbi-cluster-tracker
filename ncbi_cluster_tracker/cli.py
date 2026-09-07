@@ -4,6 +4,8 @@ from importlib.metadata import version
 
 from typing import Sequence
 
+from ncbi_cluster_tracker import download
+
 def parse_args(command: Sequence[str]) -> argparse.Namespace:
     """
     Parse command-line arguments from the user.
@@ -72,6 +74,29 @@ def parse_args(command: Sequence[str]) -> argparse.Namespace:
         action='store_true',
         default=False,
     )
+    parser.add_argument(
+        '--max-cluster-size',
+        help='Skip downloading and building the SNP tree/distance matrix for any '
+             'cluster with more than this many isolates, to avoid excessive memory '
+             'usage and download times for extremely large clusters. Set to 0 to '
+             'disable this limit. (default: %(default)s)',
+        type=int,
+        default=20000,
+    )
+    parser.add_argument(
+        '--download-timeout',
+        help='Timeout in seconds for each SNP tree download request. '
+             '(default: %(default)s)',
+        type=float,
+        default=download.DEFAULT_DOWNLOAD_TIMEOUT,
+    )
+    parser.add_argument(
+        '--download-chunk-size',
+        help='Chunk size in bytes used when streaming SNP tree downloads to disk. '
+             '(default: %(default)s)',
+        type=int,
+        default=download.DEFAULT_DOWNLOAD_CHUNK_SIZE,
+    )
     mutex_group_compare = parser.add_mutually_exclusive_group()
     mutex_group_compare.add_argument(
         '--compare-dir',
@@ -81,6 +106,15 @@ def parse_args(command: Sequence[str]) -> argparse.Namespace:
 
     if args.retry and not args.out_dir:
         parser.error('--retry flag requires --out_dir argument')
+
+    if args.max_cluster_size < 0:
+        parser.error('--max-cluster-size must be 0 (no limit) or a positive integer')
+
+    if args.download_timeout <= 0:
+        parser.error('--download-timeout must be a positive number')
+
+    if args.download_chunk_size <= 0:
+        parser.error('--download-chunk-size must be a positive integer')
 
     if args.filter_amr:
         if not args.amr:
