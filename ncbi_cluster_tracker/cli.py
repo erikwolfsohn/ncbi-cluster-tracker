@@ -75,6 +75,16 @@ def parse_args(command: Sequence[str]) -> argparse.Namespace:
         default=False,
     )
     parser.add_argument(
+        '--ai-max-tokens',
+        help='Override the AI provider context-window budget (in tokens) used when '
+             'building prompts, in place of the default per-provider limit '
+             '(Anthropic: 200000, OpenAI: 128000). A larger value lets more isolate '
+             'data fit before rows are truncated; a smaller value truncates more '
+             'aggressively. (default: provider-specific)',
+        type=int,
+        default=None,
+    )
+    parser.add_argument(
         '--max-cluster-size',
         help='Skip downloading and building the SNP tree/distance matrix for any '
              'cluster with more than this many isolates, to avoid excessive memory '
@@ -115,6 +125,9 @@ def parse_args(command: Sequence[str]) -> argparse.Namespace:
 
     if args.download_chunk_size <= 0:
         parser.error('--download-chunk-size must be a positive integer')
+
+    if args.ai_max_tokens is not None and args.ai_max_tokens <= 0:
+        parser.error('--ai-max-tokens must be a positive integer')
 
     if args.filter_amr:
         if not args.amr:

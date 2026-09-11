@@ -700,6 +700,7 @@ def write_final_report(
     ai_summary: bool = False,
     ai_provider: str | None = None,
     ai_use_cache: bool = True,
+    ai_max_tokens: int | None = None,
 ) -> None:
     """
     Output final, standalone HTML report with all tables and plots. This
@@ -721,6 +722,7 @@ def write_final_report(
                     cluster_meta,
                     provider=ai_provider,
                     use_cache=ai_use_cache,
+                    max_tokens=ai_max_tokens,
                 )
                 if summary:
                     cluster_summaries[c.name] = summary
@@ -776,14 +778,18 @@ def write_final_report(
             )
             clusters_df_for_ai = clusters_df_for_ai.merge(cluster_amr_agg, on='cluster', how='left')
             clusters_df_for_ai['amr_genes'] = clusters_df_for_ai['amr_genes'].fillna('none detected')
-        global_ai_summary = ai_module.summarize_global(clusters_df_for_ai, provider=ai_provider, use_cache=ai_use_cache)
+        global_ai_summary = ai_module.summarize_global(
+            clusters_df_for_ai, provider=ai_provider, use_cache=ai_use_cache, max_tokens=ai_max_tokens,
+        )
         if amr_df is not None:
             amr_df_with_source = amr_df.merge(
                 metadata[["biosample", "source"]].drop_duplicates(),
                 on="biosample",
                 how="left",
             )
-            amr_ai_summary = ai_module.summarize_amr(amr_df_with_source, provider=ai_provider, use_cache=ai_use_cache)
+            amr_ai_summary = ai_module.summarize_amr(
+                amr_df_with_source, provider=ai_provider, use_cache=ai_use_cache, max_tokens=ai_max_tokens,
+            )
 
     cluster_page_blocks = [ar.HTML(f'<h2>Cluster report {os.environ["NCT_NOW"]}</h2>')]
     command_header = ar.Text('Command: ')
@@ -849,6 +855,22 @@ def write_final_report(
             f'\n\n{", ".join(missing_isolates)}'
         )
         isolate_page_blocks.append(missing_message)
+
+    if 'close_to_different_source_type' in metadata.columns:
+        cross_source_isolates = metadata.query(
+            'source == "internal" and close_to_different_source_type == True'
+        )['biosample'].tolist()
+        cross_source_isolates.sort(reverse=True)
+        if cross_source_isolates:
+            cross_source_message = ar.Text(
+                f'ℹ️ NOTE: The internal isolates listed below are at least as '\
+                f'genetically close (mindiff <= minsame SNP distance) to an '\
+                f'isolate with a *different* isolation source as they are to '\
+                f'the nearest isolate with the *same* isolation source. This '\
+                f'may be useful for source attribution investigations.'
+                f'\n\n{", ".join(cross_source_isolates)}'
+            )
+            isolate_page_blocks.append(cross_source_message)
 
     cluster_report_blocks = [r.report for r in cluster_reports]
     cluster_report_blocks.sort(key=lambda r: r.label, reverse=True)

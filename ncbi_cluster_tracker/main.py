@@ -133,6 +133,7 @@ def main() -> None:
         ai_summary=args.ai_summary,
         ai_provider=args.ai_provider,
         ai_use_cache=not args.no_ai_cache,
+        ai_max_tokens=args.ai_max_tokens,
     )
 
 

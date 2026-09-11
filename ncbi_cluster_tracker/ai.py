@@ -28,7 +28,15 @@ SYSTEM_PROMPT = (
     "Note on the 'change' field: a value of 'new cluster' means no previous report was available "
     "for comparison — it does NOT mean the cluster is newly emerged in the Pathogen Detection "
     "system. Only interpret 'change' as indicating growth or decline when it contains a numeric "
-    "value (e.g. '+2 / +5')."
+    "value (e.g. '+2 / +5').\n\n"
+    "Source attribution: the isolates table may include additional columns beyond NCBI's standard "
+    "fields — for example, detailed isolation source (e.g. specific food type, restaurant, or "
+    "retail chain) or precise collection dates. When such columns are present, actively look for "
+    "shared exposures across isolates in the same cluster (a common food item, retail chain, or "
+    "tight collection date window) and call out any such pattern as a potential common source, "
+    "since this can point investigators toward the origin of an outbreak. Only draw this "
+    "connection when the data actually supports it — do not speculate about a common source when "
+    "the relevant columns are absent or inconclusive."
 )
 
 AI_CACHE_PATH = ".ncbi_cluster_tracker_ai_cache.json"
@@ -65,8 +73,35 @@ def _n_tokens(text: str) -> int:
         return len(text) // 4
 
 
-def _prompt_budget(provider: str) -> int:
-    return _CONTEXT_LIMITS.get(provider, 128_000) - _RESERVED_TOKENS
+def _prompt_budget(provider: str, max_tokens: int | None = None) -> int:
+    limit = max_tokens if max_tokens is not None else _CONTEXT_LIMITS.get(provider, 128_000)
+    return limit - _RESERVED_TOKENS
+
+
+def _max_rows_for_budget(df: pd.DataFrame, budget: int) -> int:
+    """
+    Binary search for the largest number of rows (from the top of `df`) whose
+    CSV rendering fits within `budget` tokens. Returns 0 if even an empty
+    table doesn't fit.
+    """
+    n = len(df)
+
+    def fits(n_rows: int) -> bool:
+        return _n_tokens(df.head(n_rows).to_csv(index=False)) <= budget
+
+    if n == 0 or not fits(0):
+        return 0
+    if fits(n):
+        return n
+
+    lo, hi = 0, n
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if fits(mid):
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
 
 
 def _get_anthropic_client() -> object | None:
@@ -200,14 +235,10 @@ def _build_global_prompt(clusters_df: pd.DataFrame, token_budget: int) -> str | 
     all_cols = priority_cols + [c for c in _GLOBAL_LOW_PRIORITY_COLS if c in clusters_df.columns]
     n = len(clusters_df)
 
-    for cols, n_rows in [
-        (all_cols, n),
-        (priority_cols, n),
-        (priority_cols, max(n // 2, 1)),
-        (priority_cols, 10),
-    ]:
-        table = clusters_df[cols].head(n_rows).to_csv(index=False)
-        if _n_tokens(table) <= table_budget:
+    for cols in [all_cols, priority_cols]:
+        n_rows = _max_rows_for_budget(clusters_df[cols], table_budget)
+        if n_rows > 0:
+            table = clusters_df[cols].head(n_rows).to_csv(index=False)
             if n_rows < n:
                 logger.info(f"Global prompt: truncated clusters table to {n_rows}/{n} rows to fit context window")
             return header + table
@@ -242,25 +273,42 @@ def _build_cluster_prompt(
 
     low_pri = [c for c in _CLUSTER_LOW_PRIORITY_COLS if c in isolates_df.columns]
     df = isolates_df.drop(columns=low_pri)
+
+    # Truncation below keeps only the first n_rows, so put the isolates that
+    # actually matter (internal, then new) first - otherwise a cluster with
+    # many more external than internal isolates can truncate away every
+    # internal isolate before the model ever sees them.
+    sort_cols = []
+    ascending = []
+    if 'source' in df.columns:
+        df = df.assign(_is_internal=df['source'] == 'internal')
+        sort_cols.append('_is_internal')
+        ascending.append(False)
+    if 'is_new' in df.columns:
+        df = df.assign(_is_new=df['is_new'] == 'yes')
+        sort_cols.append('_is_new')
+        ascending.append(False)
+    if sort_cols:
+        df = df.sort_values(sort_cols, ascending=ascending, kind='stable')
+        df = df.drop(columns=sort_cols)
+
     n = len(df)
+    n_rows = _max_rows_for_budget(df, table_budget)
+    if n_rows == 0:
+        logger.info(f"Cluster '{cluster_name}': omitting isolates table to fit context window")
+        return header + "(isolates table omitted: too large for context window)"
 
-    for n_rows in [n, max(n // 2, 1), 10, 0]:
-        if n_rows == 0:
-            logger.info(f"Cluster '{cluster_name}': omitting isolates table to fit context window")
-            return header + "(isolates table omitted: too large for context window)"
-        table = df.head(n_rows).to_csv(index=False)
-        if _n_tokens(table) <= table_budget:
-            if n_rows < n:
-                logger.info(f"Cluster '{cluster_name}': truncated isolates table to {n_rows}/{n} rows")
-            return header + table
-
-    return header + "(isolates table omitted: too large for context window)"
+    table = df.head(n_rows).to_csv(index=False)
+    if n_rows < n:
+        logger.info(f"Cluster '{cluster_name}': truncated isolates table to {n_rows}/{n} rows")
+    return header + table
 
 
 def summarize_global(
     clusters_df: pd.DataFrame,
     provider: str | None = None,
     use_cache: bool = True,
+    max_tokens: int | None = None,
 ) -> str | None:
     """Generate a global AI summary of all clusters. Returns markdown text or None on failure."""
     result = get_client(provider)
@@ -268,7 +316,7 @@ def summarize_global(
         return None
     client, detected_provider = result
     try:
-        budget = _prompt_budget(detected_provider)
+        budget = _prompt_budget(detected_provider, max_tokens)
         prompt = _build_global_prompt(clusters_df, budget)
         if prompt is None:
             return None
@@ -296,6 +344,7 @@ def summarize_cluster(
     isolates_df: pd.DataFrame,
     provider: str | None = None,
     use_cache: bool = True,
+    max_tokens: int | None = None,
 ) -> str | None:
     """Generate an AI summary for a single cluster. Returns markdown text or None on failure."""
     result = get_client(provider)
@@ -303,7 +352,7 @@ def summarize_cluster(
         return None
     client, detected_provider = result
     try:
-        budget = _prompt_budget(detected_provider)
+        budget = _prompt_budget(detected_provider, max_tokens)
         prompt = _build_cluster_prompt(cluster_name, cluster_row, isolates_df, budget)
         if use_cache:
             cache = _load_cache(AI_CACHE_PATH)
@@ -372,20 +421,22 @@ def _build_amr_prompt(amr_df: pd.DataFrame, token_budget: int) -> str | None:
 
     table_budget = token_budget - _n_tokens(header) - _n_tokens(internal_section)
     n = len(overall_summary)
-    for n_rows in [n, max(n // 2, 1), 10]:
-        table = overall_summary.head(n_rows).to_csv(index=False)
-        if _n_tokens(table) <= table_budget:
-            if n_rows < n:
-                logger.info(f"AMR prompt: truncated overall table to {n_rows}/{n} rows to fit context window")
-            return header + table + internal_section
-    logger.warning("AMR table too large for context window even after truncation; skipping AMR AI summary")
-    return None
+    n_rows = _max_rows_for_budget(overall_summary, table_budget)
+    if n_rows == 0:
+        logger.warning("AMR table too large for context window even after truncation; skipping AMR AI summary")
+        return None
+
+    table = overall_summary.head(n_rows).to_csv(index=False)
+    if n_rows < n:
+        logger.info(f"AMR prompt: truncated overall table to {n_rows}/{n} rows to fit context window")
+    return header + table + internal_section
 
 
 def summarize_amr(
     amr_df: pd.DataFrame,
     provider: str | None = None,
     use_cache: bool = True,
+    max_tokens: int | None = None,
 ) -> str | None:
     """Generate an AI summary of AMR findings. Returns markdown text or None on failure."""
     result = get_client(provider)
@@ -393,7 +444,7 @@ def summarize_amr(
         return None
     client, detected_provider = result
     try:
-        budget = _prompt_budget(detected_provider)
+        budget = _prompt_budget(detected_provider, max_tokens)
         prompt = _build_amr_prompt(amr_df, budget)
         if prompt is None:
             return None

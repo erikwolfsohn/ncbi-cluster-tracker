@@ -32,12 +32,14 @@ def query_isolates(clusters: list[str], biosamples: list[str]) -> pd.DataFrame:
         taxgroup_name,
         scientific_name,
         bioproject_acc,
+        minsame,
+        mindiff,
         STRING_AGG(a.element, ",") AS amr_genotypes_elements,
         STRING_AGG(a.method, ",") AS amr_genotypes_methods
     FROM `ncbi-pathogen-detect.pdbrowser.isolates`
     LEFT JOIN UNNEST(AMR_genotypes) AS a
     WHERE erd_group IN ({clusters_str})
-    OR biosample_acc IN ({biosamples_str}) 
+    OR biosample_acc IN ({biosamples_str})
     GROUP BY
         isolate_id,
         biosample,
@@ -50,12 +52,18 @@ def query_isolates(clusters: list[str], biosamples: list[str]) -> pd.DataFrame:
         creation_date,
         taxgroup_name,
         scientific_name,
-        bioproject_acc
+        bioproject_acc,
+        minsame,
+        mindiff
     ORDER BY isolate_id;
     '''
     df = execute_query(query)
     df['collection_date'] = df['collection_date'].astype('string')
-    
+    # BigQuery returns these as nullable Int64, which chokes on fillna('')
+    # downstream in report.py; use plain float64 (NaN) instead.
+    df['minsame'] = df['minsame'].astype('float64')
+    df['mindiff'] = df['mindiff'].astype('float64')
+
     def interleave_amr_fields(row: pd.Series) -> str:
         result = ''
         if row['amr_genotypes_elements'] is None:
@@ -69,6 +77,14 @@ def query_isolates(clusters: list[str], biosamples: list[str]) -> pd.DataFrame:
 
     df['amr_genotypes'] = df.apply(interleave_amr_fields, axis=1)
     df = df.drop(['amr_genotypes_elements', 'amr_genotypes_methods'], axis=1)
+    # minsame/mindiff are the minimum SNP distance to another isolate with the
+    # same/a different isolation_source, respectively (per NCBI's Isolates
+    # Browser docs). mindiff <= minsame means this isolate is at least as
+    # close, genetically, to an isolate from a different source as to one
+    # from its own source - a potential source-attribution signal.
+    df['close_to_different_source_type'] = (
+        df['minsame'].notna() & df['mindiff'].notna() & (df['mindiff'] <= df['minsame'])
+    )
     return df
 
 
